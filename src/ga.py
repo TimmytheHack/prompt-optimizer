@@ -1,6 +1,7 @@
 from deap import base, creator, tools, algorithms
 import random, string
 from src.fitness import gsm8k_accuracy
+from tqdm import tqdm
 
 POP = 30
 GENS = 10
@@ -61,35 +62,33 @@ def run_ga(generations=GENS, pop_size=POP):
         "Write just the number.",
         "Respond only with the final numeric result."
     ]
-    pop = [creator.Individual(list(s.ljust(60)[:60])) for s in SEEDS]
+    pop = [creator.Individual(list(s.ljust(40)[:40])) for s in SEEDS]
     while len(pop) < pop_size:
         pop.append(toolbox.individual())
+    
+    bar = tqdm(range(generations), desc="GA")
 
-    for gen in range(generations):
-        # 1. evaluate current pop
+    for gen in bar:
+        # 1. evaluate population
         for ind in pop:
             ind.fitness.values = toolbox.evaluate(ind)
 
-        # ----- ELITISM: copy best N before selection -----
-        elite = tools.selBest(pop, ELITE)
-        # -----------------------------------------------
+        #  Compute average fitness for display
+        avg_fit = sum(ind.fitness.values[0] for ind in pop) / len(pop)
 
-        # 2. select + variation
-        offspring = toolbox.select(pop, len(pop) - ELITE)   # space for elite
+        # 2‑4. (elitism, variation, replacement)  ← keep your existing code here
+        elite = tools.selBest(pop, ELITE)
+        offspring = toolbox.select(pop, len(pop) - ELITE)
         offspring = list(map(toolbox.clone, offspring))
         offspring = algorithms.varAnd(offspring, toolbox, cxpb=0.5, mutpb=0.4)
-
-        # 3. re‑evaluate offspring
         for ind in offspring:
             ind.fitness.values = toolbox.evaluate(ind)
-
-        # 4. next generation = offspring + elite
         pop[:] = offspring + elite
 
-        # logging
+        # update bar footer
         best = tools.selBest(pop, 1)[0]
-        print(f"Gen {gen}: best = {best.fitness.values[0]*100:.1f}% | prompt = '{''.join(best)[:120]}'")
-
+        bar.set_postfix(best=f"{best.fitness.values[0]:.3f}",
+                        avg=f"{avg_fit:.3f}")
     return best
 
 if __name__ == "__main__":
