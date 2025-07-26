@@ -58,17 +58,21 @@ def run_ga(generations=GENS, pop_size=POP):
 
     # --- GA main loop ---
     SEEDS = [
-        "Answer with one integer.",
-        "Write just the number.",
-        "Respond only with the final numeric result."
+        ("You are a helpful math tutor. Think step-by-step, "
+         "then write ANSWER: followed by the integer on the final line."),
+        "answer with one integer.",
+        "write just the number."
     ]
     pop = [creator.Individual(list(s.ljust(40)[:40])) for s in SEEDS]
     while len(pop) < pop_size:
         pop.append(toolbox.individual())
     
-    bar = tqdm(range(generations), desc="GA")
+    # Create a manual progress bar so we can call `update()` **after** all work in the
+    # generation has finished.  Otherwise the bar appears to "freeze" during the long
+    # evaluation step because the automatic update happens *before* the heavy work.
+    bar = tqdm(total=generations, desc="GA")
 
-    for gen in bar:
+    for gen in range(generations):
         # 1. evaluate population
         for ind in pop:
             ind.fitness.values = toolbox.evaluate(ind)
@@ -85,10 +89,12 @@ def run_ga(generations=GENS, pop_size=POP):
             ind.fitness.values = toolbox.evaluate(ind)
         pop[:] = offspring + elite
 
-        # update bar footer
+        # update bar footer **and** advance the bar by one step
         best = tools.selBest(pop, 1)[0]
         bar.set_postfix(best=f"{best.fitness.values[0]:.3f}",
                         avg=f"{avg_fit:.3f}")
+        bar.update(1)
+    bar.close()
     return best
 
 if __name__ == "__main__":
