@@ -1,12 +1,10 @@
 #fitness.py
 import json, re, asyncio, collections, random
 from typing import Optional
-from asyncio import Semaphore
 from src.llm_wrapper import call_llama_async
 
 _dev = json.load(open("data/gsm8k_dev.json"))
 _NUM = re.compile(r"-?\d+")
-_SEM = Semaphore(6)                       # max concurrent HTTP calls
 
 def _extract_int(text: str) -> Optional[str]:
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
@@ -21,44 +19,46 @@ def _extract_int(text: str) -> Optional[str]:
             return ints[-1]
     return None
 
-async def _one_accuracy(prompt: str, item: dict, *, model: str, backend: str) -> str:
+async def _one_accuracy(prompt, item, *, model, backend):
     full = f"{prompt}\nQ: {item['question']}\nA:"
-    async with _SEM:
-        return await call_llama_async(full, model=model, backend=backend)
+    return await call_llama_async(full, model=model, backend=backend)
 
-async def _accuracy(prompt: str, *, k: int, n_try: int, rand: random.Random, model: str, backend: str) -> float:
+async def _accuracy(prompt: str, *, k: int, n_try: int,
+                    rand: random.Random, model: str, backend: str) -> float:
+
     sample = rand.sample(_dev, k) if k < len(_dev) else _dev
 
-    tasks = [
-        _one_accuracy(prompt, item, model=model, backend=backend)
-        for item in sample
-        for _ in range(n_try)
-    ]
-    outs = await asyncio.gather(*tasks, return_exceptions=True)
+    outs = []
+    for item in sample:
+        for _ in range(n_try):
+            outs.append(
+                await _one_accuracy(prompt, item, model=model, backend=backend)
+            )
 
     # ② regroup outputs back into their questions
     votes_per_q = collections.defaultdict(list)
     idx = 0
     for item in sample:
         for _ in range(n_try):
-            votes_per_q[item["question"]].append(outs[idx])
+            o = outs[idx]
+            if not isinstance(o, Exception):
+                votes_per_q[item["question"]].append(o)
             idx += 1
 
-    # ③ majority vote & score
+    # ③ majority vote & score  (unchanged)
     correct = 0
     for item in sample:
         answers = votes_per_q[item["question"]]
-        preds = [_extract_int(o or "") for o in answers
-                 if not isinstance(o, Exception)]
+        preds = [_extract_int(o) for o in answers]
         if not preds:
             continue
-
         vote = collections.Counter(preds).most_common(1)[0][0]
-        gt = _extract_int(item["answer"] or "")
+        gt   = _extract_int(item["answer"] or "")
         if gt is not None and vote == gt:
             correct += 1
 
     return correct / k
+
     
 
 def gsm8k_accuracy(

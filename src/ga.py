@@ -9,10 +9,27 @@ POP = 30
 GENS = 10
 ELITE = 1
 PREFIX = (
-    "You are a helpful math tutor. First think step-by-step. On the **last line** print\n"
+    # Introduction
+    "You are a helpful math tutor. On the **last line** print\n"
     "ANSWER: <the integer answer>\n\n"
-    "Be concise. Explain your reasoning.\n\n"
-)  # v1.0-prompted
+
+    # ─── Few-Shot Examples ───────────────────────────────────────────
+    "Q: Sadie slept 8 hours on Monday. For the next two days, she slept 2 hours less, each, because she had to complete some assignments. If the rest of the week she slept 1 hour more than those two days, how many hours did she sleep in total throughout the week?\n"
+    "A: Mon=8; next 2 days=8-2=6 each → 6*2=12; remaining 4 days=6+1=7 each → 7*4=28; total=8+12+28=48\n"
+    "ANSWER: 48\n\n"
+
+    "Q: Rosie can run 10 miles per hour for 3 hours. After that, she runs 5 miles per hour. How many miles can she run in 7 hours?\n"
+    "A: First 3 h:10*3=30 mi; remaining 4 h:5*4=20 mi; total=30+20=50\n"
+    "ANSWER: 50\n\n"
+
+    "Q: Jennie is helping at her mom's office. She has a pile of 60 letters needing stamps, and a pile of letters already stamped. She puts stamps on one-third of the letters needing stamps. If there are now 30 letters in the pile of already-stamped letters, how many were in that pile when Jennie began?\n"
+    "A: She stamped 60/3=20; so originally there were 30-20=10 already stamped\n"
+    "ANSWER: 10\n\n"
+    # ────────────────────────────────────────────────────────────────────
+
+    # Instruction (the driver will add the actual Q/A)
+    "Now solve the next problem:\n"
+)
 TAIL_LEN = 40
 ALPHABET  = list(string.ascii_lowercase + " ,.:;\n")
 PHRASES = [
@@ -97,14 +114,12 @@ def run_ga(
         penalty: float = 0.002,
         backend: str = "ollama",
         model:   str = "mistral:7b-instruct",
-        sema: int = 6,
     ):
 
     bar = tqdm(total=generations+1, desc="GA", mininterval=0.5)
     # --- toolbox setup ---
     toolbox = base.Toolbox()
     import src.fitness as fitness
-    fitness._SEM = fitness.Semaphore(sema)
 
     # attributes & individuals
     pool = ThreadPoolExecutor(max_workers=min(pop_size, 8))   # GA‑level parallelism
@@ -122,7 +137,7 @@ def run_ga(
         BASE_PROMPT,
         k=k,
         n_try=sc,
-        rand=random.Random(0),
+        rand=rnd,
         backend=backend,
         model=model
     )
@@ -148,7 +163,8 @@ def run_ga(
     toolbox.register("evaluate", evaluate)
     toolbox.register("mate", crossover)
     # light char‐swap, heavy phrase‐ops
-    toolbox.register("mutate", mutate_prompt, indpb=0.02)
+    toolbox.register("mutate", mutate_prompt, indpb=0.05)  # char-level
+    cxpb = 0.3; mutpb = 0.7
     toolbox.register("select", tools.selTournament, tournsize=3)
 
     # --- GA main loop ---
@@ -178,7 +194,11 @@ def run_ga(
         rnd = random.Random(42 + gen)
         cache.clear()
         # --- evaluate population (parallel) ---
-        fits = list(toolbox.map(toolbox.evaluate, pop))
+        fits = []
+        with tqdm(total=len(pop), desc=f"G{gen}", leave=False) as inner:
+            for fit in toolbox.map(toolbox.evaluate, pop):
+                fits.append(fit)
+                inner.update(1)
         for ind, fit in zip(pop, fits):
             ind.fitness.values = fit
 
@@ -186,7 +206,7 @@ def run_ga(
         elite     = tools.selBest(pop, ELITE)
         offspring = toolbox.select(pop, len(pop) - ELITE)
         offspring = list(map(toolbox.clone, offspring))
-        offspring = algorithms.varAnd(offspring, toolbox, cxpb=0.3, mutpb=0.9)
+        offspring = algorithms.varAnd(offspring, toolbox, cxpb=cxpb, mutpb=mutpb)
 
         # re‑evaluate offspring (parallel!)
         fits = list(toolbox.map(toolbox.evaluate, offspring))
@@ -227,15 +247,13 @@ if __name__ == "__main__":
     p.add_argument("--k",    type=int, default=10)
     p.add_argument("--sc",   type=int, default=2)
     p.add_argument("--penalty", type=float, default=0.002,
-                   help="length-penalty coefficient (score − penalty*len)")
+                   help="length-penalty coefficient (score - penalty*len)")
     p.add_argument("--backend", default="ollama", choices=["ollama", "openai"],
                    help="LLM provider")
     p.add_argument("--model", default="mistral:7b-instruct", help="model ID/tag")
-    p.add_argument("--sema", type=int, default=6, help="max concurrent LLM calls (fitness semaphore)")
     args = p.parse_args()
 
     best = run_ga(args.gens, args.pop,
               k=args.k, sc=args.sc, penalty=args.penalty,
-              backend=args.backend, model=args.model,
-              sema=args.sema)
+              backend=args.backend, model=args.model)
     print("\n🏆 Best prompt:\n", "".join(best))
