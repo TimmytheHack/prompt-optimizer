@@ -19,3 +19,14 @@ six==1.17.0
 tiktoken==0.9.0
 urllib3==2.5.0
 zipp==3.23.0
+
+# Async LLM calls (Ollama uses plain HTTP via aiohttp)
+aiohttp==3.12.15
+
+# LLM backends
+openai>=0.27.0
+# (optional) if you want to pull an Ollama client package from PyPI:
+# ollama-client>=0.1.0
+
+# Progress bars
+tqdm==4.65.0

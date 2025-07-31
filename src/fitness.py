@@ -1,10 +1,12 @@
 #fitness.py
 import json, re, asyncio, collections, random
 from typing import Optional
-from src.llm_wrapper import call_llama_async
+from asyncio import Semaphore
+from llm_wrapper import call_llama_async
 
 _dev = json.load(open("data/gsm8k_dev.json"))
 _NUM = re.compile(r"-?\d+")
+_SEM = Semaphore(6)
 
 def _extract_int(text: str) -> Optional[str]:
     lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
@@ -21,13 +23,13 @@ def _extract_int(text: str) -> Optional[str]:
 
 async def _one_accuracy(prompt, item, *, model, backend):
     full = f"{prompt}\nQ: {item['question']}\nA:"
-    return await call_llama_async(full, model=model, backend=backend)
+    async with _SEM:
+        return await call_llama_async(full, model=model, backend=backend)
 
 async def _accuracy(prompt: str, *, k: int, n_try: int,
                     rand: random.Random, model: str, backend: str) -> float:
 
     sample = rand.sample(_dev, k) if k < len(_dev) else _dev
-
     outs = []
     for item in sample:
         for _ in range(n_try):

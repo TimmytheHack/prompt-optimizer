@@ -1,9 +1,9 @@
 from deap import base, creator, tools, algorithms
 import random, string
-from src.fitness import gsm8k_accuracy
 from tqdm import tqdm
 import csv, datetime
-from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import fitness
 
 POP = 30
 GENS = 10
@@ -30,64 +30,61 @@ PREFIX = (
     # Instruction (the driver will add the actual Q/A)
     "Now solve the next problem:\n"
 )
-TAIL_LEN = 40
-ALPHABET  = list(string.ascii_lowercase + " ,.:;\n")
-PHRASES = [
+
+SNIPPETS = [
     "Let's think step by step.",
     "Explain your reasoning.",
     "Be concise.",
     "Show your work.",
     "Final answer:",
+    "Answer only with the integer.",
+    "Show your calculations.",
+    "Break down each step.",
+    "Answer succinctly.",
+    "No explanation—just the numeric result.",
+    "Include units if applicable.",
+    "Outline each algebraic step.",
+    "Answer succinctly in one sentence.",
+    "Outline each algebraic step clearly.",
+    "Use bullet points for each step."
 ]
-PHRASE_INSERT_P = 0.5   # 50% chance to try inserting a snippet
-PHRASE_DELETE_P = 0.2   # 20% chance to try deleting a snippet
+MAX_SNIPPETS = 4 
+
 
 if "FitnessMax" not in creator.__dict__:
     creator.create("FitnessMax", base.Fitness, weights=(1.0,))
     creator.create("Individual", list, fitness=creator.FitnessMax)
 
-def mutate_prompt(ind, indpb=0.1):
-    # 1) character‐level noise (as before)
+def mutate_snippets(ind, indpb=0.2, addp=0.3, delp=0.3):
+    # 1) change existing entries
     for i in range(len(ind)):
         if random.random() < indpb:
-            ind[i] = random.choice(ALPHABET)
-
-    # 2) phrase insertion
-    if random.random() < PHRASE_INSERT_P:
-        phrase = random.choice(PHRASES)
-        # pick a random insert position
-        pos = random.randrange(len(ind)+1)
-        # insert the phrase’s characters
-        for c in phrase:
-            ind.insert(pos, c)
-
-    # 3) phrase deletion (remove one known phrase if present)
-    if random.random() < PHRASE_DELETE_P:
-        tail_str = "".join(ind)
-        for phrase in PHRASES:
-            idx = tail_str.find(phrase)
-            if idx != -1:
-                # delete that slice
-                for _ in phrase:
-                    del ind[idx]
-                break
-
-    # 4) keep within bounds
-    if len(ind) > TAIL_LEN:
-        del ind[TAIL_LEN:]
-    elif len(ind) < 1:
-        # ensure at least one char
-        ind.append(random.choice(ALPHABET))
-
+            new = random.randrange(len(SNIPPETS))
+            ind[i] = new
+    # 2) append a *new* snippet if not already present
+    if random.random() < addp and len(ind) < MAX_SNIPPETS:
+        choices = [i for i in range(len(SNIPPETS)) if i not in ind]
+        if choices:
+            ind.append(random.choice(choices))
+    # 3) drop a snippet
+    if random.random() < delp and len(ind) > 1:
+        del ind[random.randrange(len(ind))]
     return ind,
 
+
+
 def crossover(p1, p2):
-    cut = random.randint(1, min(len(p1), len(p2)) - 1)
+    # if either parent is too short to split, skip crossover
+    size = min(len(p1), len(p2))
+    if size <= 1:
+        return p1, p2
 
-    # Use the parent’s __class__ to preserve type (and .fitness)
+    # pick a cut point in [1, size-1]
+    cut = random.randint(1, size - 1)
+
+    # build children (preserving Individual class & fitness metadata)
     child1 = p1.__class__(p1[:cut] + p2[cut:])
-    child2 = p2.__class__(p1[cut:] + p2[:cut])
-
+    child2 = p2.__class__(p2[:cut] + p1[cut:])
     return child1, child2
 
 # ---------------------------------------------------------------------------
@@ -105,7 +102,7 @@ def hill_climb(ind):
     score = ind.fitness.values[0] if ind.fitness.valid else 0.0
     return ind, score
 
-def run_ga(
+async def run_ga(
         generations: int = GENS,
         pop_size: int   = POP,
         *,
@@ -119,21 +116,20 @@ def run_ga(
     bar = tqdm(total=generations+1, desc="GA", mininterval=0.5)
     # --- toolbox setup ---
     toolbox = base.Toolbox()
-    import src.fitness as fitness
+    
 
     # attributes & individuals
-    pool = ThreadPoolExecutor(max_workers=min(pop_size, 8))   # GA‑level parallelism
-    toolbox.register("map", pool.map)
-    toolbox.register("attr_char", random.choice, ALPHABET)
+    # snippet-index tails
+    toolbox.register("attr_snip", random.randrange, len(SNIPPETS))
     toolbox.register("individual", tools.initRepeat,
-                     creator.Individual, toolbox.attr_char, TAIL_LEN)
+                     creator.Individual, toolbox.attr_snip, MAX_SNIPPETS)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
     # evaluation wraps gsm8k_accuracy
     cache: dict[str, float] = {}
     rnd = random.Random(42)
     BASE_PROMPT = PREFIX.rstrip()
-    baseline_acc = gsm8k_accuracy(
+    baseline_acc = await fitness._accuracy(
         BASE_PROMPT,
         k=k,
         n_try=sc,
@@ -143,42 +139,44 @@ def run_ga(
     )
     bar.update(1)
     
-    def evaluate(ind):
-        prompt = BASE_PROMPT + "".join(ind).rstrip()
+    async def evaluate(ind):
+        # join only non‐empty snippets, separated by spaces
+        tail = " ".join(SNIPPETS[i] for i in ind)
+        prompt = BASE_PROMPT + (f"\n{tail}\n" if tail else "")
         # 1) get or compute raw accuracy
         if prompt not in cache:
-            acc = gsm8k_accuracy(prompt, k=k, n_try=sc, rand=rnd,
-                                   backend=backend, model=model)
+            acc = await fitness._accuracy(
+                prompt, k=k, n_try=sc, rand=rnd, model=model, backend=backend
+            )
             cache[prompt] = acc
         acc = cache[prompt]
 
         # 2) if we haven't beaten baseline, ignore length penalty
         if acc <= baseline_acc:
-            fitness = acc
+            fit_val = acc
         else:
-            fitness = acc - penalty * len(prompt)
+            fit_val = acc - penalty * len(prompt)
 
-        return (fitness,)
+        return (fit_val,)
 
     toolbox.register("evaluate", evaluate)
     toolbox.register("mate", crossover)
     # light char‐swap, heavy phrase‐ops
-    toolbox.register("mutate", mutate_prompt, indpb=0.05)  # char-level
+    toolbox.register("mutate", mutate_snippets)
     cxpb = 0.3; mutpb = 0.7
     toolbox.register("select", tools.selTournament, tournsize=3)
 
     # --- GA main loop ---
+    # Seed with a few human templates (as indices)
     SEEDS = [
-        "Give only the integer.",
-        "Final answer:",
-        ""                       # blank tail
+        [0],  # "Let's think step by step."
+        [4],  # "Final answer:"
+        []    # blank
     ]
-    pop = [creator.Individual(list(s.strip().ljust(TAIL_LEN)[:TAIL_LEN])) for s in SEEDS]
+    pop = [creator.Individual(seed) for seed in SEEDS]
+    # fill out the rest randomly
     while len(pop) < pop_size:
         pop.append(toolbox.individual())
-    for ind in pop:
-        if all(c == " " for c in ind):
-            ind[0] = random.choice(ALPHABET)
 
     log = open('ga_history.csv', 'w', newline='')
     writer = csv.writer(log)
@@ -187,18 +185,23 @@ def run_ga(
     # Create a manual progress bar so we can call `update()` **after** all work in the
     # generation has finished.  Otherwise the bar appears to "freeze" during the long
     # evaluation step because the automatic update happens *before* the heavy work.
-    best_hist, patience = [], 4
+    best_hist, patience = [], 6
     
 
     for gen in range(generations):
         rnd = random.Random(42 + gen)
         cache.clear()
-        # --- evaluate population (parallel) ---
+         # schedule all evaluations under fitness._SEM
+        tasks = [evaluate(ind) for ind in pop]
         fits = []
+        # ← create the “inner” progress bar for this generation
         with tqdm(total=len(pop), desc=f"G{gen}", leave=False) as inner:
-            for fit in toolbox.map(toolbox.evaluate, pop):
+            for coro in asyncio.as_completed(tasks):
+                fit = await coro
                 fits.append(fit)
                 inner.update(1)
+
+        # assign fitness to the evaluated population
         for ind, fit in zip(pop, fits):
             ind.fitness.values = fit
 
@@ -208,9 +211,9 @@ def run_ga(
         offspring = list(map(toolbox.clone, offspring))
         offspring = algorithms.varAnd(offspring, toolbox, cxpb=cxpb, mutpb=mutpb)
 
-        # re‑evaluate offspring (parallel!)
-        fits = list(toolbox.map(toolbox.evaluate, offspring))
-        for ind, fit in zip(offspring, fits):
+        # re-evaluate offspring (async parallel under our loop)
+        fits_off = await asyncio.gather(*(evaluate(ind) for ind in offspring))
+        for ind, fit in zip(offspring, fits_off):
             ind.fitness.values = fit
 
         pop[:] = offspring + elite
@@ -220,8 +223,16 @@ def run_ga(
         avg_fit  = sum(fits) / len(fits)
         best     = tools.selBest(pop, 1)[0]
 
-        writer.writerow([datetime.datetime.now().isoformat(),
-                        gen, best.fitness.values[0], avg_fit, ''.join(best)])
+      # turn the best Integer‐list into a human‐readable snippet tail
+        best_tail = " ".join(SNIPPETS[i] for i in best)
+   
+        writer.writerow([
+            datetime.datetime.now().isoformat(),
+            gen,
+            best.fitness.values[0],
+            avg_fit,
+            best_tail
+        ])
         log.flush()
         bar.set_postfix(best=f"{best.fitness.values[0]:.3f}", avg=f"{avg_fit:.3f}")
         bar.update(1)
@@ -253,7 +264,12 @@ if __name__ == "__main__":
     p.add_argument("--model", default="mistral:7b-instruct", help="model ID/tag")
     args = p.parse_args()
 
-    best = run_ga(args.gens, args.pop,
-              k=args.k, sc=args.sc, penalty=args.penalty,
-              backend=args.backend, model=args.model)
-    print("\n🏆 Best prompt:\n", "".join(best))
+    best = asyncio.run(
+        run_ga(args.gens, args.pop,
+               k=args.k, sc=args.sc, penalty=args.penalty,
+               backend=args.backend, model=args.model)
+    )
+    # turn the integer indices back into text snippets
+    base = PREFIX.rstrip()
+    best_tail = " ".join(SNIPPETS[i] for i in best)
+    print("\n🏆 Best prompt:\n", base + (f"\n{best_tail}\n" if best_tail else ""))
