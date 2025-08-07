@@ -84,7 +84,3 @@ prompt-opt bench [OPTIONS]
 * **Quantization**: Try `mistral:7b-instruct-q4_0` for smaller memory footprint and faster inference.
 * **Customize snippets**: Edit `SNIPPETS` in `src/ga.py` to add or remove instruction phrases.
 * **Adjust penalty**: Use `--penalty` to balance prompt length vs. accuracy.
-
-## License
-
-MIT © Ching Tin Zhang
